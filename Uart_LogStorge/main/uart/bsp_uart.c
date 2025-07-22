@@ -5,17 +5,21 @@
 #include "freertos/queue.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
-#include "driver/rmt.h"//新版驱动不好用，不便于检测分辨率
+// #include "driver/rmt.h"//新版驱动不好用，不便于检测分辨率，用回旧版
 #include "esp_log.h"
 #include "math.h"
+// 包含 bsp_tfcard.h 头文件
+#include "bsp_tfcard.h"
 
 // --- 配置 ---
 #define RMT_RX_CHANNEL          RMT_CHANNEL_2 // Use a valid RX channel like 2 or 3
 #define UART_PORT_FOR_DETECT    UART_NUM_1
-#define UART_RX_PIN_FOR_DETECT  (GPIO_NUM_5)
-#define UART_TX_PIN_FOR_DETECT  (GPIO_NUM_4)
+#define UART_RX_PIN_FOR_DETECT  (GPIO_NUM_0)
+#define UART_TX_PIN_FOR_DETECT  (GPIO_NUM_1)
 
 static const char *TAG = "UART";
+
+void uart_task(void *pvParameters);
 
 static int autobaud_detect(uart_port_t uart_num, gpio_num_t rx_pin, gpio_num_t tx_pin)
 {
@@ -90,90 +94,88 @@ static int autobaud_detect(uart_port_t uart_num, gpio_num_t rx_pin, gpio_num_t t
     return 0; // 未找到匹配波特率
 }
 
-static long detect_baud_via_rmt(uart_port_t uart_num, gpio_num_t rx_pin, gpio_num_t tx_pin) {
-    uint8_t RMT_RX_CLK_DIV = 80; // RMT计数器时钟分频器 (APB CLK is 80MHz, 80/80 = 1MHz, 1 tick = 1us)
-    uint32_t RMT_TICK_PER_US = (80000000 / RMT_RX_CLK_DIV);
-    uint8_t RMT_FILTER_TICKS_THRESH = 10; // RMT接收滤波器阈值，忽略小于10 ticks (10us) 的脉冲
-    uint16_t RMT_IDLE_THRESH_US = 5000;   // 5ms空闲阈值，认为一次传输结束
-    uint8_t RMT_MEM_BLOCK_NUM = 1;
-    float BAUD_RATE_TOLERANCE = 0.15; // 15%的波特率容差
-    // 标准波特率列表
-    const int standard_baud_rates[] = {300, 600, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 74880, 115200, 230400, 460800, 921600};
-    const int num_standard_baud_rates = sizeof(standard_baud_rates) / sizeof(standard_baud_rates[0]);
+// static long detect_baud_via_rmt(uart_port_t uart_num, gpio_num_t rx_pin, gpio_num_t tx_pin) {
+//     uint8_t RMT_RX_CLK_DIV = 80; // RMT计数器时钟分频器 (APB CLK is 80MHz, 80/80 = 1MHz, 1 tick = 1us)
+//     uint32_t RMT_TICK_PER_US = (80000000 / RMT_RX_CLK_DIV);
+//     uint8_t RMT_FILTER_TICKS_THRESH = 10; // RMT接收滤波器阈值，忽略小于10 ticks (10us) 的脉冲
+//     uint16_t RMT_IDLE_THRESH_US = 5000;   // 5ms空闲阈值，认为一次传输结束
+//     uint8_t RMT_MEM_BLOCK_NUM = 1;
+//     float BAUD_RATE_TOLERANCE = 0.15; // 15%的波特率容差
+//     // 标准波特率列表
+//     const int standard_baud_rates[] = {300, 600, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 74880, 115200, 230400, 460800, 921600};
+//     const int num_standard_baud_rates = sizeof(standard_baud_rates) / sizeof(standard_baud_rates[0]);
 
-    if(uart_is_driver_installed(uart_num)) {
-        ESP_LOGI(TAG, "删除原有的UART驱动");
-        ESP_ERROR_CHECK(uart_driver_delete(uart_num));
-    }
+//     if(uart_is_driver_installed(uart_num)) {
+//         ESP_LOGI(TAG, "删除原有的UART驱动");
+//         ESP_ERROR_CHECK(uart_driver_delete(uart_num));
+//     }
 
-    // 1. 配置RMT为接收模式
-    rmt_config_t rmt_rx_config = RMT_DEFAULT_CONFIG_RX(rx_pin, RMT_RX_CHANNEL);
-    rmt_rx_config.clk_div = RMT_RX_CLK_DIV;
-    rmt_rx_config.mem_block_num = RMT_MEM_BLOCK_NUM;
-    rmt_rx_config.rx_config.filter_en = true;
-    rmt_rx_config.rx_config.filter_ticks_thresh = RMT_FILTER_TICKS_THRESH;
-    rmt_rx_config.rx_config.idle_threshold = (RMT_IDLE_THRESH_US);
+//     // 1. 配置RMT为接收模式
+//     rmt_config_t rmt_rx_config = RMT_DEFAULT_CONFIG_RX(rx_pin, RMT_RX_CHANNEL);
+//     rmt_rx_config.clk_div = RMT_RX_CLK_DIV;
+//     rmt_rx_config.mem_block_num = RMT_MEM_BLOCK_NUM;
+//     rmt_rx_config.rx_config.filter_en = true;
+//     rmt_rx_config.rx_config.filter_ticks_thresh = RMT_FILTER_TICKS_THRESH;
+//     rmt_rx_config.rx_config.idle_threshold = (RMT_IDLE_THRESH_US);
 
-    ESP_LOGI(TAG, "安装RMT驱动...");
-    ESP_ERROR_CHECK(rmt_config(&rmt_rx_config));
-    ESP_ERROR_CHECK(rmt_driver_install(RMT_RX_CHANNEL, 1000, 0));
+//     ESP_LOGI(TAG, "安装RMT驱动...");
+//     ESP_ERROR_CHECK(rmt_config(&rmt_rx_config));
+//     ESP_ERROR_CHECK(rmt_driver_install(RMT_RX_CHANNEL, 1000, 0));
 
-    RingbufHandle_t rb = NULL;
-    ESP_ERROR_CHECK(rmt_get_ringbuf_handle(RMT_RX_CHANNEL, &rb));
+//     RingbufHandle_t rb = NULL;
+//     ESP_ERROR_CHECK(rmt_get_ringbuf_handle(RMT_RX_CHANNEL, &rb));
 
-    ESP_LOGI(TAG, "启动RMT接收器，请在引脚 %d 上发送数据...", rx_pin);
-    ESP_ERROR_CHECK(rmt_rx_start(RMT_RX_CHANNEL, true));
-    size_t rx_size = 0;
-    rmt_item32_t *items = NULL;
-    long detected_baud_rate = 0;
+//     ESP_LOGI(TAG, "启动RMT接收器，请在引脚 %d 上发送数据...", rx_pin);
+//     ESP_ERROR_CHECK(rmt_rx_start(RMT_RX_CHANNEL, true));
+//     size_t rx_size = 0;
+//     rmt_item32_t *items = NULL;
+//     long detected_baud_rate = 0;
 
-    while (1) {
-        items = (rmt_item32_t *)xRingbufferReceive(rb, &rx_size, pdMS_TO_TICKS(1000));
-        if (items) {
-            int start_bit_found = 0;
-            for (int i = 0; i < rx_size / sizeof(rmt_item32_t); i++) {
-                if (items[i].level0 == 0) {
-                    uint32_t bit_duration_ticks = items[i].duration0;
-                    ESP_LOGI(TAG, "检测到起始位脉冲，宽度: %lu ticks", bit_duration_ticks);
+//     while (1) {
+//         items = (rmt_item32_t *)xRingbufferReceive(rb, &rx_size, pdMS_TO_TICKS(1000));
+//         if (items) {
+//             int start_bit_found = 0;
+//             for (int i = 0; i < rx_size / sizeof(rmt_item32_t); i++) {
+//                 if (items[i].level0 == 0) {
+//                     uint32_t bit_duration_ticks = items[i].duration0;
+//                     ESP_LOGI(TAG, "检测到起始位脉冲，宽度: %lu ticks", bit_duration_ticks);
                     
-                    double calculated_baud_rate = (double)RMT_TICK_PER_US / bit_duration_ticks;
-                    ESP_LOGI(TAG, "计算出的波特率: %.2f", calculated_baud_rate);
+//                     double calculated_baud_rate = (double)RMT_TICK_PER_US / bit_duration_ticks;
+//                     ESP_LOGI(TAG, "计算出的波特率: %.2f", calculated_baud_rate);
 
-                    for (int j = 0; j < num_standard_baud_rates; j++) {
-                        if (fabs(calculated_baud_rate - standard_baud_rates[j]) < standard_baud_rates[j] * BAUD_RATE_TOLERANCE) {
-                            detected_baud_rate = standard_baud_rates[j];
-                            start_bit_found = 1;
-                            break;
-                        }
-                    }
-                    if(start_bit_found) break;
-                }
-            }
-            vRingbufferReturnItem(rb, (void *)items);
-            if(start_bit_found) break;
-        } else {
-            ESP_LOGI(TAG, "等待数据...");
-        }
-    }
-    ESP_LOGI(TAG, "停止RMT接收器...");
-    rmt_rx_stop(RMT_RX_CHANNEL);
-    rmt_driver_uninstall(RMT_RX_CHANNEL);
+//                     for (int j = 0; j < num_standard_baud_rates; j++) {
+//                         if (fabs(calculated_baud_rate - standard_baud_rates[j]) < standard_baud_rates[j] * BAUD_RATE_TOLERANCE) {
+//                             detected_baud_rate = standard_baud_rates[j];
+//                             start_bit_found = 1;
+//                             break;
+//                         }
+//                     }
+//                     if(start_bit_found) break;
+//                 }
+//             }
+//             vRingbufferReturnItem(rb, (void *)items);
+//             if(start_bit_found) break;
+//         } else {
+//             ESP_LOGI(TAG, "等待数据...");
+//         }
+//     }
+//     ESP_LOGI(TAG, "停止RMT接收器...");
+//     rmt_rx_stop(RMT_RX_CHANNEL);
+//     rmt_driver_uninstall(RMT_RX_CHANNEL);
 
-    if (detected_baud_rate > 0) {
-        ESP_LOGI(TAG, "最终检测到的波特率: %ld", detected_baud_rate);
-    } else {
-        ESP_LOGE(TAG, "未能检测到有效的波特率，将使用默认值 9600");
-        detected_baud_rate = 9600;
-    }
-    return detected_baud_rate;
-}
+//     if (detected_baud_rate > 0) {
+//         ESP_LOGI(TAG, "最终检测到的波特率: %ld", detected_baud_rate);
+//     } else {
+//         ESP_LOGE(TAG, "未能检测到有效的波特率，将使用默认值 9600");
+//         detected_baud_rate = 9600;
+//     }
+//     return detected_baud_rate;
+// }
 
-
-
-// RMT接收任务
-void uart_task(void *pvParameters)
+// 初始化UART
+void uart_init(void)
 {
-    uart_config_t uart_config = {
+        uart_config_t uart_config = {
         .baud_rate = 115200,
         .data_bits = UART_DATA_8_BITS,
         .parity = UART_PARITY_DISABLE,
@@ -181,19 +183,30 @@ void uart_task(void *pvParameters)
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
     };
-    ESP_ERROR_CHECK(uart_driver_install(UART_PORT_FOR_DETECT, 1024 * 2, 0, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_driver_install(UART_PORT_FOR_DETECT, 1024 * 10, 0, 0, NULL, 0));
     ESP_ERROR_CHECK(uart_param_config(UART_PORT_FOR_DETECT, &uart_config));
     ESP_ERROR_CHECK(uart_set_pin(UART_PORT_FOR_DETECT, UART_TX_PIN_FOR_DETECT, UART_RX_PIN_FOR_DETECT, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
+    // 创建 UART 任务
+    xTaskCreate(uart_task, "uart_task", 4096, NULL, 10, NULL);
+}
+
+// RMT接收任务
+void uart_task(void *pvParameters)
+{
     // 4. UART正常工作
-    uint8_t *data = (uint8_t *)malloc(1024);
+    uint8_t data[1024];
     while (1) {
-        int len = uart_read_bytes(UART_PORT_FOR_DETECT, data, 1023, pdMS_TO_TICKS(20));
+        int len = uart_read_bytes(UART_PORT_FOR_DETECT, data, sizeof(data), pdMS_TO_TICKS(20));
         if (len) {
             data[len] = '\0';
             ESP_LOGI(TAG, "UART接收到 %d 字节: %s", len, (char *)data);
+            // 将接收到的数据写入TF卡的环形缓冲区
+            tfcard_write_to_buffer((const char *)data, len);
             // 回显数据
             uart_write_bytes(UART_PORT_FOR_DETECT, (const char *)data, len);
         }
+        // vTaskDelay(pdMS_TO_TICKS(1));
     }
+    free(data); // 释放分配的内存
 }

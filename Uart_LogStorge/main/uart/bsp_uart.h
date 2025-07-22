@@ -1,1 +1,1 @@
-void uart_task(void *pvParameters);
+void uart_init(void);
