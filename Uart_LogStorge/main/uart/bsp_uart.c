@@ -8,8 +8,8 @@
 // #include "driver/rmt.h"//新版驱动不好用，不便于检测分辨率，用回旧版
 #include "esp_log.h"
 #include "math.h"
-// 包含 bsp_tfcard.h 头文件
 #include "bsp_tfcard.h"
+#include "freertos/semphr.h" 
 
 // --- 配置 ---
 #define RMT_RX_CHANNEL          RMT_CHANNEL_2 // Use a valid RX channel like 2 or 3
@@ -192,21 +192,53 @@ void uart_init(void)
 }
 
 // RMT接收任务
+// UART 任务
 void uart_task(void *pvParameters)
 {
+    #define data_len 256
     // 4. UART正常工作
-    uint8_t data[1024];
+    uint8_t data[data_len];
     while (1) {
-        int len = uart_read_bytes(UART_PORT_FOR_DETECT, data, sizeof(data), pdMS_TO_TICKS(20));
+        int len = uart_read_bytes(UART_PORT_FOR_DETECT, data, sizeof(data), pdMS_TO_TICKS(10));
         if (len) {
-            data[len] = '\0';
-            ESP_LOGI(TAG, "UART接收到 %d 字节: %s", len, (char *)data);
-            // 将接收到的数据写入TF卡的环形缓冲区
-            tfcard_write_to_buffer((const char *)data, len);
-            // 回显数据
-            uart_write_bytes(UART_PORT_FOR_DETECT, (const char *)data, len);
+            // 获取系统启动以来的毫秒数
+            uint32_t timestamp = esp_log_timestamp();
+
+            // 计算小时、分钟、秒和毫秒
+            uint32_t hours = timestamp / (1000 * 60 * 60);
+            timestamp %= (1000 * 60 * 60);
+            uint32_t minutes = timestamp / (1000 * 60);
+            timestamp %= (1000 * 60);
+            uint32_t seconds = timestamp / 1000;
+            uint32_t milliseconds = timestamp % 1000;
+
+            // 定义带时间戳的缓冲区
+            char timestamped_data[data_len + 32]; // 为时间戳预留空间
+            int timestamp_len = snprintf(timestamped_data, sizeof(timestamped_data), "[%02ld:%02ld:%02ld.%03ld] ", hours, minutes, seconds, milliseconds);
+            size_t available_space = sizeof(timestamped_data) - timestamp_len - 2; // 保留换行符和终止符空间
+            if (available_space > 0 && len > 0) {
+                // 计算实际可拷贝长度
+                size_t copy_len = (len <= available_space) ? len : available_space;
+                
+                memcpy(timestamped_data + timestamp_len, data, copy_len);
+                timestamp_len += copy_len;
+                
+                // 安全添加换行符和终止符
+                timestamped_data[timestamp_len] = '\n';
+                timestamped_data[timestamp_len + 1] = '\0'; // 确保字符串终止
+                timestamp_len++; // 包含换行符的长度
+            } else {
+                // 缓冲区不足时添加终止符
+                timestamped_data[timestamp_len] = '\0';
+                ESP_LOGW(TAG, "数据截断，可用空间不足");
+            }
+
+            ESP_LOGI(TAG, "UART接收到 %d 字节", len);
+            // 将带时间戳的数据写入TF卡的环形缓冲区
+            tfcard_write_to_buffer(timestamped_data, timestamp_len);
+            // 回显原始数据
+            // uart_write_bytes(UART_PORT_FOR_DETECT, (const char *)timestamped_data, timestamp_len);
         }
         // vTaskDelay(pdMS_TO_TICKS(1));
     }
-    free(data); // 释放分配的内存
 }

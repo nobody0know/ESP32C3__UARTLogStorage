@@ -18,6 +18,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/ringbuf.h"
+#include "freertos/semphr.h" 
 
 // You can change the pin assignments here by changing the following 4 lines.
 #define PIN_NUM_MISO  GPIO_NUM_6
@@ -29,12 +30,13 @@
 
 #define MAX_CHAR_SIZE    64
 // 增大缓冲区初始大小
-#define BUFFER_SIZE      4096
-#define WRITE_INTERVAL   pdMS_TO_TICKS(1000) // 1 秒写入一次
-#define BUFFER_RESIZE_THRESHOLD 0.2 // 缓冲区使用达到 80% 时尝试扩容
+#define BUFFER_SIZE      8192
+#define WRITE_INTERVAL   pdMS_TO_TICKS(500) // 1 秒写入一次
+#define BUFFER_RESIZE_THRESHOLD 0.4 // 缓冲区使用达到 60% 时尝试扩容
 #define BUFFER_RESIZE_STEP 2048 // 每次扩容的大小
 
 static const char *TAG = "tfcard";
+SemaphoreHandle_t tfcard_ringbuf_mutex = NULL; 
 
 void tfcard_task(void *pvParameters);
 
@@ -68,39 +70,55 @@ pin_configuration_t config = {
 };
 #endif //CONFIG_DEBUG_PIN_CONNECTIONS
 
-static esp_err_t s_write_file(const char *path, char *data)
-{
-    ESP_LOGI(TAG, "Opening file %s", path);
-    FILE *f;
-    // if(stat(path, NULL) == -1)
-    // {
-    //     ESP_LOGI(TAG, "File not exists");
-    //     // // 检查目录是否可写
-    //     // char dir_path[128];
-    //     // strncpy(dir_path, path, sizeof(dir_path));
-    //     // char *last_slash = strrchr(dir_path, '/');
-    //     // if (last_slash) {
-    //     //     *last_slash = '\0';
-    //     //     if (access(dir_path, W_OK) != 0) {
-    //     //         ESP_LOGE(TAG, "Directory %s is not writable", dir_path);
-    //     //         return ESP_FAIL;
-    //     //     }
-    //     // }
-    //     f = fopen(path, "w"); 
-    // }
-    // else{
-    //     ESP_LOGI(TAG, "File exists append it");
-    //     f = fopen(path, "a"); // 以追加模式打开文件
-    // }
+#define WRITE_CHUNK_SIZE 1024 // 每次写入的数据块大小
 
-    f = fopen(path, "w"); 
-    if (f == NULL) {
-        ESP_LOGE(TAG, "Failed to open file for writing");
+// 修改 s_write_file 函数，在函数内部获取和释放锁
+static esp_err_t s_write_file(const char *path, const char *data)
+{
+    if (tfcard_ringbuf_mutex == NULL) {
+        ESP_LOGE(TAG, "Mutex is not initialized");
         return ESP_FAIL;
     }
-    fprintf(f, "%s", data);
+
+    // 获取互斥锁
+    if (xSemaphoreTake(tfcard_ringbuf_mutex, portMAX_DELAY) != pdTRUE) {
+        ESP_LOGE(TAG, "Failed to take mutex");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Opening file %s", path);
+    FILE *f;
+    f = fopen(path, "a"); // 以追加模式打开文件
+
+    if (f == NULL) {
+        ESP_LOGE(TAG, "Failed to open file for writing");
+        // 释放互斥锁
+        xSemaphoreGive(tfcard_ringbuf_mutex);
+        return ESP_FAIL;
+    }
+
+    const char *ptr = data;
+    size_t remaining = strlen(data);
+
+    while (remaining > 0) {
+        size_t chunk_size = (remaining < WRITE_CHUNK_SIZE) ? remaining : WRITE_CHUNK_SIZE;
+        size_t written = fwrite(ptr, 1, chunk_size, f);
+        if (written != chunk_size) {
+            ESP_LOGE(TAG, "Failed to write data to file");
+            fclose(f);
+            // 释放互斥锁
+            xSemaphoreGive(tfcard_ringbuf_mutex);
+            return ESP_FAIL;
+        }
+        ptr += written;
+        remaining -= written;
+    }
+
     fclose(f);
     ESP_LOGI(TAG, "Data written to file");
+
+    // 释放互斥锁
+    xSemaphoreGive(tfcard_ringbuf_mutex);
 
     return ESP_OK;
 }
@@ -129,33 +147,40 @@ static esp_err_t s_read_file(const char *path)
 
 // 动态调整缓冲区大小
 static bool resize_ringbuffer() {
-    size_t buffer_size = BUFFER_SIZE;
+    static size_t buffer_size = BUFFER_SIZE;
     size_t buffer_free = xRingbufferGetCurFreeSize(tfcard_ringbuf);
-    // ESP_LOGI(TAG, "buffer_size: %d, buffer_used: %d", buffer_size, buffer_free);
+    ESP_LOGI(TAG, "buffer_size: %d, buffer_free: %d", buffer_size, buffer_free);
     if ((float)buffer_free / buffer_size <= BUFFER_RESIZE_THRESHOLD) {
-        RingbufHandle_t new_ringbuf = xRingbufferCreate(buffer_size + BUFFER_RESIZE_STEP, RINGBUF_TYPE_BYTEBUF);
-        if (new_ringbuf == NULL) {
-            ESP_LOGE(TAG, "Failed to create new ring buffer for resizing");
-            return false;
-        }
-
-        // 将旧缓冲区的数据转移到新缓冲区
-        size_t item_size;
-        void *item;
-        while ((item = xRingbufferReceive(tfcard_ringbuf, &item_size, 0)) != NULL) {
-            if (!xRingbufferSend(new_ringbuf, item, item_size, 0)) {
-                ESP_LOGE(TAG, "Failed to transfer data to new ring buffer");
-                vRingbufferReturnItem(tfcard_ringbuf, item);
-                vRingbufferDelete(new_ringbuf);
+        if (xSemaphoreTake(tfcard_ringbuf_mutex, portMAX_DELAY) == pdTRUE) { // 获取互斥锁
+            RingbufHandle_t new_ringbuf = xRingbufferCreate(buffer_size + BUFFER_RESIZE_STEP, RINGBUF_TYPE_BYTEBUF);
+            if (new_ringbuf == NULL) {
+                ESP_LOGE(TAG, "Failed to create new ring buffer for resizing");
+                xSemaphoreGive(tfcard_ringbuf_mutex); // 释放互斥锁
                 return false;
             }
-            vRingbufferReturnItem(tfcard_ringbuf, item);
-        }
 
-        vRingbufferDelete(tfcard_ringbuf);
-        tfcard_ringbuf = new_ringbuf;
-        ESP_LOGI(TAG, "Ring buffer resized to %d bytes", buffer_size + BUFFER_RESIZE_STEP);
-        return true;
+            // 将旧缓冲区的数据转移到新缓冲区
+            size_t item_size;
+            void *item;
+            while ((item = xRingbufferReceive(tfcard_ringbuf, &item_size, 0)) != NULL) {
+                if (!xRingbufferSend(new_ringbuf, item, item_size, 0)) {
+                    ESP_LOGE(TAG, "Failed to transfer data to new ring buffer");
+                    vRingbufferReturnItem(tfcard_ringbuf, item);
+                    vRingbufferDelete(new_ringbuf);
+                    xSemaphoreGive(tfcard_ringbuf_mutex); // 释放互斥锁
+                    return false;
+                }
+                vRingbufferReturnItem(tfcard_ringbuf, item);
+            }
+
+            vRingbufferDelete(tfcard_ringbuf);
+            tfcard_ringbuf = new_ringbuf;
+            ESP_LOGI(TAG, "Ring buffer resized to %d bytes", buffer_size + BUFFER_RESIZE_STEP);
+            buffer_size += BUFFER_RESIZE_STEP;
+            
+            xSemaphoreGive(tfcard_ringbuf_mutex); // 释放互斥锁
+            return true;
+        }
     }
     return false;
 }
@@ -163,6 +188,12 @@ static bool resize_ringbuffer() {
 void tfcard_init(void)
 {
     esp_err_t ret;
+
+    tfcard_ringbuf_mutex = xSemaphoreCreateMutex(); // 创建互斥锁
+    if (tfcard_ringbuf_mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create mutex for ring buffer");
+        return;
+    }
 
     // 创建环形缓冲区
     tfcard_ringbuf = xRingbufferCreate(BUFFER_SIZE, RINGBUF_TYPE_BYTEBUF);
@@ -267,19 +298,18 @@ void tfcard_task(void *pvParameters)
     int file_index = 1;
     struct stat st;
 
+    //注意FATFS默认是8.3文件名，长文件名需要打开FATFS_LONG_FILENAMES，才支持比较现代的文件名格式
     // 查找可用的日志文件名
-    // do {
-    //     snprintf(file_path, sizeof(file_path), "%s/tfcard_log_data_%d.txt", MOUNT_POINT, file_index);
-    //     file_index++;
-    // } while (stat(file_path, &st) == 0);
-    
-    snprintf(file_path, sizeof(file_path), "%s/nihao.txt", MOUNT_POINT);
+    do {
+        snprintf(file_path, sizeof(file_path), "%s/tfcard_log_data_%d.txt", MOUNT_POINT, file_index);
+        file_index++;
+    } while (stat(file_path, &st) == 0);
 
     ESP_LOGI(TAG, "Using log file: %s", file_path);
 
     size_t item_size;
     char *data;
-    char write_buffer[1024]; // 临时写入缓冲区
+    char write_buffer[1024];
     size_t buffer_index = 0;
 
     while (1) {
@@ -289,19 +319,36 @@ void tfcard_task(void *pvParameters)
         // 从环形缓冲区读取数据
         data = (char *)xRingbufferReceive(tfcard_ringbuf, &item_size, WRITE_INTERVAL);
         if (data != NULL) {
-            // 检查是否有足够空间将数据添加到写入缓冲区
-            if (buffer_index + item_size < sizeof(write_buffer)) {
+            
+            if (buffer_index + item_size + 1 < sizeof(write_buffer)) {
                 memcpy(write_buffer + buffer_index, data, item_size);
                 buffer_index += item_size;
+                buffer_index++;
             } else {
                 // 写入缓冲区已满，先写入文件
+                ESP_LOGI(TAG, "Write buffer full, writing to file...");
                 write_buffer[buffer_index] = '\0';
+                // 调用 s_write_file 时会自动获取和释放锁
                 s_write_file(file_path, write_buffer);
                 buffer_index = 0;
 
-                // 将新数据添加到空的写入缓冲区
-                memcpy(write_buffer, data, item_size);
-                buffer_index = item_size;
+                // 循环处理大块数据（新增循环机制）
+                size_t remaining = item_size;
+                const char *src_ptr = data;
+                while (remaining > 0) {
+                    size_t copy_size = (remaining < sizeof(write_buffer)) ? remaining : sizeof(write_buffer)-1;
+                    memcpy(write_buffer, src_ptr, copy_size);
+                    buffer_index = copy_size;
+                    src_ptr += copy_size;
+                    remaining -= copy_size;
+                    
+                    // 如果填满缓冲区则立即写入（新增立即写入判断）
+                    if (buffer_index >= sizeof(write_buffer) - 1) {
+                        write_buffer[buffer_index] = '\0';
+                        s_write_file(file_path, write_buffer);
+                        buffer_index = 0;
+                    }
+                }
             }
             vRingbufferReturnItem(tfcard_ringbuf, (void *)data); // 归还缓冲区
         }
@@ -309,6 +356,7 @@ void tfcard_task(void *pvParameters)
         // 定时写入剩余数据
         if (buffer_index > 0) {
             write_buffer[buffer_index] = '\0';
+            // 调用 s_write_file 时会自动获取和释放锁
             s_write_file(file_path, write_buffer);
             buffer_index = 0;
         }
@@ -321,14 +369,19 @@ void tfcard_task(void *pvParameters)
 void tfcard_write_to_buffer(const char *data, size_t len)
 {
     if (tfcard_ringbuf != NULL) {
-        size_t free_size = xRingbufferGetCurFreeSize(tfcard_ringbuf);
-        if (free_size < len) {
-            ESP_LOGW(TAG, "Ring buffer is almost full, waiting for space...");
-            while (xRingbufferGetCurFreeSize(tfcard_ringbuf) < len) {
-                vTaskDelay(pdMS_TO_TICKS(100));
+        if (xSemaphoreTake(tfcard_ringbuf_mutex, portMAX_DELAY) == pdTRUE) { // 获取互斥锁
+            size_t free_size = xRingbufferGetCurFreeSize(tfcard_ringbuf);
+            if (free_size < len) {
+                ESP_LOGW(TAG, "Ring buffer is almost full, waiting for space...");
+                while (xRingbufferGetCurFreeSize(tfcard_ringbuf) < len) {
+                    xSemaphoreGive(tfcard_ringbuf_mutex); // 释放互斥锁
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    xSemaphoreTake(tfcard_ringbuf_mutex, portMAX_DELAY); // 重新获取互斥锁
+                }
             }
+            xRingbufferSend(tfcard_ringbuf, data, len, portMAX_DELAY);
+            xSemaphoreGive(tfcard_ringbuf_mutex); // 释放互斥锁
         }
-        xRingbufferSend(tfcard_ringbuf, data, len, portMAX_DELAY);
     }
 }
 
