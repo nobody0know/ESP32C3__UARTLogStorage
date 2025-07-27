@@ -237,7 +237,7 @@ void uart_task(void *pvParameters)
             // 将带时间戳的数据写入TF卡的环形缓冲区
             tfcard_write_to_buffer(timestamped_data, timestamp_len);
             // 回显原始数据
-            // uart_write_bytes(UART_PORT_FOR_DETECT, (const char *)timestamped_data, timestamp_len);
+            uart_write_bytes(UART_PORT_FOR_DETECT, (const char *)timestamped_data, timestamp_len);
         }
         // vTaskDelay(pdMS_TO_TICKS(1));
     }
