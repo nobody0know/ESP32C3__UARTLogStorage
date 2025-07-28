@@ -7,6 +7,34 @@ def generate_random_sequence(length):
     """生成指定长度的随机字符串"""
     return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
 
+def build_partial_match_table(pattern):
+    """构建KMP部分匹配表"""
+    table = [0] * len(pattern)
+    j = 0
+    for i in range(1, len(pattern)):
+        while j > 0 and pattern[i] != pattern[j]:
+            j = table[j-1]
+        if pattern[i] == pattern[j]:
+            j += 1
+        table[i] = j
+    return table
+
+def kmp_search(pattern, text):
+    """KMP字符串搜索算法"""
+    if not pattern:
+        return 0
+    table = build_partial_match_table(pattern)
+    j = 0  # pattern的索引
+    
+    for i in range(len(text)):
+        while j > 0 and text[i] != pattern[j]:
+            j = table[j-1]
+        if text[i] == pattern[j]:
+            j += 1
+        if j == len(pattern):
+            return i - j + 1  # 返回匹配起始位置
+    return -1
+
 def test_serial_port(port, baudrate, sequence_length, send_frequency):
     """测试串口功能"""
     try:
@@ -29,12 +57,12 @@ def test_serial_port(port, baudrate, sequence_length, send_frequency):
             received_data = ser.read(ser.in_waiting).decode()
             print(f"接收到的数据: {received_data}")
 
-            # 检查回显是否包含发送的序列
-            if sequence in received_data:
+            # 检查回显是否包含发送的序列（修改此处）
+            if kmp_search(sequence, received_data) != -1:
                 print("回显包含发送的序列，测试通过")
             else:
                 print("回显不包含发送的序列，测试失败")
-
+                
             # 按照指定频率等待
             time.sleep(1 / send_frequency)
 
@@ -49,9 +77,9 @@ def test_serial_port(port, baudrate, sequence_length, send_frequency):
 
 if __name__ == "__main__":
     # 配置参数
-    serial_port = 'COM3'  # 根据实际情况修改串口名称，Linux 下可能是 '/dev/ttyUSB0'
+    serial_port = 'COM7'  # 根据实际情况修改串口名称，Linux 下可能是 '/dev/ttyUSB0'
     baud_rate = 115200    # 波特率
-    sequence_length = 10  # 随机序列长度
-    send_frequency = 1    # 发送频率（次/秒）
+    sequence_length = 100  # 随机序列长度
+    send_frequency = 10    # 发送频率（次/秒）
 
     test_serial_port(serial_port, baud_rate, sequence_length, send_frequency)

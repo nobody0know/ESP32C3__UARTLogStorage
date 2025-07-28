@@ -6,6 +6,8 @@
 /*.hex
 /*.log
 
+dependencies.lock
+
 
 # ESP-IDF generated files
 /project_description.json

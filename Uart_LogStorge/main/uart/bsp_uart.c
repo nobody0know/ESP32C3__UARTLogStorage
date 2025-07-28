@@ -191,14 +191,13 @@ void uart_init(void)
     xTaskCreate(uart_task, "uart_task", 4096, NULL, 10, NULL);
 }
 
-// RMT接收任务
 // UART 任务
 void uart_task(void *pvParameters)
 {
-    #define data_len 256
-    // 4. UART正常工作
-    uint8_t data[data_len];
+    uint32_t data_len = 256;
+
     while (1) {
+        uint8_t data[data_len];
         int len = uart_read_bytes(UART_PORT_FOR_DETECT, data, sizeof(data), pdMS_TO_TICKS(10));
         if (len) {
             // 获取系统启动以来的毫秒数
@@ -228,12 +227,21 @@ void uart_task(void *pvParameters)
                 timestamped_data[timestamp_len + 1] = '\0'; // 确保字符串终止
                 timestamp_len++; // 包含换行符的长度
             } else {
-                // 缓冲区不足时添加终止符
+                // 添加终止符前确保不越界
+                timestamp_len = (timestamp_len < sizeof(timestamped_data)) ? timestamp_len : sizeof(timestamped_data)-1;
                 timestamped_data[timestamp_len] = '\0';
-                ESP_LOGW(TAG, "数据截断，可用空间不足");
+                
+                // 带限制的缓冲区扩容
+                const size_t MAX_BUFFER_SIZE = 1024; // 1KB 最大缓冲区
+                if (data_len < MAX_BUFFER_SIZE) {
+                    ESP_LOGW(TAG, "数据截断，缓冲区从 %ld 扩容至 %ld", data_len, data_len * 2);
+                    data_len = (data_len * 2 < MAX_BUFFER_SIZE) ? data_len * 2 : MAX_BUFFER_SIZE;
+                } else {
+                    ESP_LOGE(TAG, "达到最大缓冲区限制 %d，数据丢失！", MAX_BUFFER_SIZE);
+                }
             }
 
-            ESP_LOGI(TAG, "UART接收到 %d 字节", len);
+            // ESP_LOGI(TAG, "UART接收到 %d 字节", len);
             // 将带时间戳的数据写入TF卡的环形缓冲区
             tfcard_write_to_buffer(timestamped_data, timestamp_len);
             // 回显原始数据
