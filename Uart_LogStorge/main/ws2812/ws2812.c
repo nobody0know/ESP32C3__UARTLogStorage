@@ -167,6 +167,7 @@ void ok_led()
     red = 0;
     blue = 0;
     green = 11;
+    
 }
 
 void error_led()
@@ -175,6 +176,14 @@ void error_led()
     blue = 11;
     green = 0;
 }
+
+void tfcard_writing()
+{
+    red = 0;
+    blue = 11;
+    green = 0;
+}
+
 
 void ws2812_init(void)
 {

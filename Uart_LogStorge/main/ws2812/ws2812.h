@@ -38,3 +38,4 @@ void ws2812_init(void);
 void ok_led();
 void close_led();
 void error_led();
+void tfcard_writing();

@@ -14,12 +14,13 @@
 #include "bsp_uart.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
-#include "sd_test_io.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/ringbuf.h"
 #include "freertos/semphr.h"
 #include "ws2812/ws2812.h"
+#include "esp_timer.h"
+
 
 
 
@@ -50,29 +51,6 @@ sdmmc_card_t *card;
 
 const char mount_point[] = MOUNT_POINT;
 
-#ifdef CONFIG_DEBUG_PIN_CONNECTIONS
-const char *names[] = {"CLK ", "MOSI", "MISO", "CS  "};
-const int pins[] = {CONFIG_PIN_CLK,
-                    CONFIG_PIN_MOSI,
-                    CONFIG_PIN_MISO,
-                    CONFIG_PIN_CS};
-
-const int pin_count = sizeof(pins) / sizeof(pins[0]);
-#if CONFIG_ENABLE_ADC_FEATURE
-const int adc_channels[] = {CONFIG_ADC_PIN_CLK,
-                            CONFIG_ADC_PIN_MOSI,
-                            CONFIG_ADC_PIN_MISO,
-                            CONFIG_ADC_PIN_CS};
-#endif // CONFIG_ENABLE_ADC_FEATURE
-
-pin_configuration_t config = {
-    .names = names,
-    .pins = pins,
-#if CONFIG_ENABLE_ADC_FEATURE
-    .adc_channels = adc_channels,
-#endif
-};
-#endif // CONFIG_DEBUG_PIN_CONNECTIONS
 
 #define WRITE_CHUNK_SIZE 1024 // 每次写入的数据块大小
 
@@ -92,7 +70,7 @@ static esp_err_t s_write_file(const char *path, const char *data,size_t len)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Opening file %s", path);
+    // ESP_LOGI(TAG, "Opening file %s", path);
     FILE *f;
     f = fopen(path, "ab"); // 以追加模式打开文件
 
@@ -157,6 +135,32 @@ static esp_err_t s_read_file(const char *path)
 
     return ESP_OK;
 }
+
+void format_tfcard(char mount_point[],sdmmc_card_t *card)
+
+{
+    esp_err_t ret;
+    ret = esp_vfs_fat_sdcard_unmount(mount_point,card);
+
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to unmount SD card");
+        return;
+    }
+
+    ESP_LOGW(TAG, "SD card will be formated after 5 seconds!!!!!!!!!!!");
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    ESP_LOGW(TAG, "SD card will be formated now!!!!!!!!!!!");
+
+    ret = esp_vfs_fat_sdcard_format(mount_point, card);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to format FATFS (%s)", esp_err_to_name(ret));
+        return;
+    }
+
+}
+
 
 // 动态调整缓冲区大小
 static bool resize_ringbuffer()
@@ -233,11 +237,6 @@ void tfcard_init(void)
     // If format_if_mount_failed is set to true, SD card will be partitioned and
     // formatted in case when mounting fails.
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-#ifdef CONFIG_FORMAT_IF_MOUNT_FAILED
-        .format_if_mount_failed = true,
-#else
-        .format_if_mount_failed = false,
-#endif // FORMAT_IF_MOUNT_FAILED
         .max_files = 5,
         .allocation_unit_size = 16 * 1024};
 
@@ -275,17 +274,6 @@ void tfcard_init(void)
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_config.gpio_cs = PIN_NUM_CS;
     slot_config.host_id = host.slot;
-
-    // #define CONFIG_FORMAT_SD_CARD
-#ifdef CONFIG_FORMAT_SD_CARD
-    ESP_LOGI(TAG, "Formatting SD card");
-    ret = esp_vfs_fat_sdcard_format(mount_point, card);
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE(TAG, "Failed to format FATFS (%s)", esp_err_to_name(ret));
-        return;
-    }
-#endif // CONFIG_FORMAT_SD_CARD
 
     ESP_LOGI(TAG, "Mounting filesystem");
     ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
@@ -340,12 +328,14 @@ void tfcard_task(void *pvParameters)
         file_index++;
     } while (stat(file_path, &st) == 0);
 
-    ESP_LOGI(TAG, "Using log file: %s", file_path);
+    // ESP_LOGI(TAG, "Using log file: %s", file_path);
 
     size_t item_size;
     char *data;
     char write_buffer[1024];
     size_t buffer_index = 0;
+    uint64_t last_idle_time = 0;
+    uint64_t idle_time = 0;
 
     while (1)
     {
@@ -356,6 +346,9 @@ void tfcard_task(void *pvParameters)
         data = (char *)xRingbufferReceive(tfcard_ringbuf, &item_size, WRITE_INTERVAL);
         if (data != NULL)
         {
+            idle_time = esp_timer_get_time();
+
+            tfcard_writing();
 
             if (buffer_index + item_size < sizeof(write_buffer))
             {
@@ -397,6 +390,16 @@ void tfcard_task(void *pvParameters)
             s_write_file(file_path, write_buffer, buffer_index);
             buffer_index = 0;
         }
+        else
+        {
+            last_idle_time = esp_timer_get_time();
+            if (last_idle_time - idle_time > 1000000)
+            {
+                last_idle_time = idle_time;
+                ok_led();
+            }
+        }
+
 
         vTaskDelay(WRITE_INTERVAL);
     }
