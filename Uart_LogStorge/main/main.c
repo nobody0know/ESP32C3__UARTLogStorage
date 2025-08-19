@@ -2,6 +2,8 @@
 #include "tfcard/bsp_tfcard.h"
 #include "esp_log.h"
 #include "ws2812/ws2812.h"
+#include "BLE/ble_gatt.h"
+
 
 
 // 日志标签
@@ -13,6 +15,9 @@ void app_main(void)
 
     // 初始化 UART
     uart_init();
+
+    // 初始化 BLE
+    ble_gatt_init();
 
     vTaskDelay(1000 / portTICK_PERIOD_MS);
 

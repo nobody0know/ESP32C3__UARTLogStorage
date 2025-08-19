@@ -11,6 +11,8 @@
 #include "bsp_tfcard.h"
 #include "freertos/semphr.h" 
 
+#include "ble_gatt.h"
+
 // --- 配置 ---
 #define RMT_RX_CHANNEL          RMT_CHANNEL_2 // Use a valid RX channel like 2 or 3
 #define UART_PORT_FOR_DETECT    UART_NUM_1
@@ -247,6 +249,8 @@ void uart_task(void *pvParameters)
             ESP_LOGI(TAG, "%s", timestamped_data);
             // 将带时间戳的数据写入TF卡的环形缓冲区
             tfcard_write_to_buffer(timestamped_data, timestamp_len);
+            // 将带时间戳的数据写入BLE的环形缓冲区
+            ble_write_to_buffer(timestamped_data, timestamp_len);
             // 回显原始数据
             // uart_write_bytes(UART_PORT_FOR_DETECT, (const char *)timestamped_data, timestamp_len);
         }

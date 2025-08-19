@@ -5,6 +5,8 @@
 /*.map
 /*.hex
 /*.log
+/sdkconfig
+
 
 dependencies.lock
 
