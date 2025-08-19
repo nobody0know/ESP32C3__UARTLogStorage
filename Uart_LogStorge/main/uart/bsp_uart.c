@@ -187,6 +187,8 @@ void uart_init(void)
     ESP_ERROR_CHECK(uart_param_config(UART_PORT_FOR_DETECT, &uart_config));
     ESP_ERROR_CHECK(uart_set_pin(UART_PORT_FOR_DETECT, UART_TX_PIN_FOR_DETECT, UART_RX_PIN_FOR_DETECT, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
+    gpio_set_pull_mode(UART_RX_PIN_FOR_DETECT, GPIO_PULLUP_ONLY); //防止设备断电后的浮动电平导致收到乱码数据
+
     // 创建 UART 任务
     xTaskCreate(uart_task, "uart_task", 4096, NULL, 10, NULL);
 }

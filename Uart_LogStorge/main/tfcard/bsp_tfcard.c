@@ -19,6 +19,9 @@
 #include "freertos/task.h"
 #include "freertos/ringbuf.h"
 #include "freertos/semphr.h"
+#include "ws2812/ws2812.h"
+
+
 
 // You can change the pin assignments here by changing the following 4 lines.
 #define PIN_NUM_MISO GPIO_NUM_6
@@ -34,6 +37,8 @@
 #define WRITE_INTERVAL pdMS_TO_TICKS(500) // 1 秒写入一次
 #define BUFFER_RESIZE_THRESHOLD 0.4       // 缓冲区使用达到 60% 时尝试扩容
 #define BUFFER_RESIZE_STEP 2048           // 每次扩容的大小
+#define BUFFER_MAX_SIZE 1024 * 30  // 30KB 最大缓冲区大小
+
 
 static const char *TAG = "tfcard";
 SemaphoreHandle_t tfcard_ringbuf_mutex = NULL;
@@ -158,9 +163,15 @@ static bool resize_ringbuffer()
 {
     static size_t buffer_size = BUFFER_SIZE;
     size_t buffer_free = xRingbufferGetCurFreeSize(tfcard_ringbuf);
-    ESP_LOGI(TAG, "buffer_size: %d, buffer_free: %d", buffer_size, buffer_free);
+    // ESP_LOGI(TAG, "buffer_size: %d, buffer_free: %d", buffer_size, buffer_free);
     if ((float)buffer_free / buffer_size <= BUFFER_RESIZE_THRESHOLD)
     {
+
+        if (buffer_size + BUFFER_RESIZE_STEP > BUFFER_MAX_SIZE) {
+            ESP_LOGE(TAG, "Cannot resize buffer beyond max size %d", BUFFER_MAX_SIZE);
+            return false;
+        }
+
         if (xSemaphoreTake(tfcard_ringbuf_mutex, portMAX_DELAY) == pdTRUE)
         { // 获取互斥锁
             RingbufHandle_t new_ringbuf = xRingbufferCreate(buffer_size + BUFFER_RESIZE_STEP, RINGBUF_TYPE_BYTEBUF);
@@ -298,6 +309,8 @@ void tfcard_init(void)
         return;
     }
     ESP_LOGI(TAG, "Filesystem mounted");
+
+    ok_led();
 
     // Card has been initialized, print its properties
     sdmmc_card_print_info(stdout, card);
