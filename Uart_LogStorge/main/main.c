@@ -2,6 +2,8 @@
 #include "tfcard/bsp_tfcard.h"
 #include "esp_log.h"
 #include "ws2812/ws2812.h"
+#include "BLE/ble_gatt_server.h"
+
 
 
 // 日志标签
@@ -10,6 +12,9 @@ static const char *TAG = "MAIN";
 void app_main(void)
 {
     ESP_LOGI(TAG, "Starting application...");
+
+    // 初始化 BLE
+    ble_gatt_init();
 
     // 初始化 UART
     uart_init();
