@@ -19,9 +19,6 @@ void app_main(void)
     // 初始化 UART
     uart_init();
 
-    // 初始化 BLE
-    ble_gatt_init();
-
     vTaskDelay(1000 / portTICK_PERIOD_MS);
 
     // 初始化 WS2812
