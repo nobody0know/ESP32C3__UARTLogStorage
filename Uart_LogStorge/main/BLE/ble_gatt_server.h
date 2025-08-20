@@ -1,1 +1,0 @@
-void ble_gatt_init(void);

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2021-2025 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2021-2024 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Unlicense OR CC0-1.0
  */
@@ -32,11 +32,13 @@
 #include "esp_bt_main.h"
 #include "esp_bt_device.h"
 #include "esp_gatt_common_api.h"
-#include "esp_random.h"
+
+#include "freertos/ringbuf.h"
+#include "driver/uart.h"
 
 #include "sdkconfig.h"
 
-#define GATTS_TAG "GATTS_DEMO"
+#define GATTS_TAG "BLE_GATT:"
 
 ///Declare the static function
 static void gatts_profile_a_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param);
@@ -52,6 +54,7 @@ static void gatts_profile_b_event_handler(esp_gatts_cb_event_t event, esp_gatt_i
 #define GATTS_DESCR_UUID_TEST_B     0x2222
 #define GATTS_NUM_HANDLE_TEST_B     4
 
+
 static char test_device_name[ESP_BLE_ADV_NAME_LEN_MAX] = "ESP_GATTS_DEMO";
 
 #define TEST_MANUFACTURER_DATA_LEN  17
@@ -60,24 +63,15 @@ static char test_device_name[ESP_BLE_ADV_NAME_LEN_MAX] = "ESP_GATTS_DEMO";
 
 #define PREPARE_BUF_MAX_SIZE 1024
 
-#define CONFIG_EXAMPLE_CHAR_READ_DATA_LEN 4
-
 static uint8_t char1_str[] = {0x11,0x22,0x33};
-
-static uint16_t descr_value = 0x0;
-/**
- * Current MTU size for the active connection.
- *
- * This simplified implementation assumes a single connection.
- * For multi-connection scenarios, the MTU should be stored per connection ID.
- */
-static uint16_t local_mtu = 23;
-
-static uint8_t char_value_read[CONFIG_EXAMPLE_CHAR_READ_DATA_LEN] = {0xDE,0xED,0xBE,0xEF};
-
-
 static esp_gatt_char_prop_t a_property = 0;
 static esp_gatt_char_prop_t b_property = 0;
+
+#define UART_BLE_RINGBUF_SIZE 4096
+static RingbufHandle_t uart_ble_ringbuf = NULL;
+static SemaphoreHandle_t uart_ble_mutex = NULL;
+static uint16_t negotiated_mtu = 203; // Default to 20 bytes if MTU negotiation fails
+
 
 static esp_attr_value_t gatts_demo_char1_val =
 {
@@ -370,53 +364,17 @@ static void gatts_profile_a_event_handler(esp_gatts_cb_event_t event, esp_gatt_i
         esp_ble_gatts_create_service(gatts_if, &gl_profile_tab[PROFILE_A_APP_ID].service_id, GATTS_NUM_HANDLE_TEST_A);
         break;
     case ESP_GATTS_READ_EVT: {
-        ESP_LOGI(GATTS_TAG,
-                    "Characteristic read request: conn_id=%d, trans_id=%" PRIu32 ", handle=%d, is_long=%d, offset=%d, need_rsp=%d",
-                    param->read.conn_id, param->read.trans_id, param->read.handle,
-                    param->read.is_long, param->read.offset, param->read.need_rsp);
-
-        // If no response is needed, exit early (stack handles it automatically)
-        if (!param->read.need_rsp) {
-            return;
-        }
-
+        ESP_LOGI(GATTS_TAG, "Characteristic read, conn_id %d, trans_id %" PRIu32 ", handle %d", param->read.conn_id, param->read.trans_id, param->read.handle);
         esp_gatt_rsp_t rsp;
         memset(&rsp, 0, sizeof(esp_gatt_rsp_t));
         rsp.attr_value.handle = param->read.handle;
-
-        // Handle descriptor read request
-        if (param->read.handle == gl_profile_tab[PROFILE_A_APP_ID].descr_handle) {
-            memcpy(rsp.attr_value.value, &descr_value, 2);
-            rsp.attr_value.len = 2;
-            esp_ble_gatts_send_response(gatts_if, param->read.conn_id, param->read.trans_id, ESP_GATT_OK, &rsp);
-            return;
-        }
-
-        // Handle characteristic read request
-        if (param->read.handle == gl_profile_tab[PROFILE_A_APP_ID].char_handle) {
-            uint16_t offset = param->read.offset;
-
-            // Validate read offset
-            if (param->read.is_long && offset > CONFIG_EXAMPLE_CHAR_READ_DATA_LEN) {
-                ESP_LOGW(GATTS_TAG, "Read offset (%d) out of range (0-%d)", offset, CONFIG_EXAMPLE_CHAR_READ_DATA_LEN);
-                rsp.attr_value.len = 0;
-                esp_ble_gatts_send_response(gatts_if, param->read.conn_id, param->read.trans_id, ESP_GATT_INVALID_OFFSET, &rsp);
-                return;
-            }
-
-            // Determine response length based on MTU
-            uint16_t mtu_size = local_mtu - 1;  // ATT header (1 byte)
-            uint16_t send_len = (CONFIG_EXAMPLE_CHAR_READ_DATA_LEN - offset > mtu_size) ? mtu_size : (CONFIG_EXAMPLE_CHAR_READ_DATA_LEN - offset);
-
-            memcpy(rsp.attr_value.value, &char_value_read[offset], send_len);
-            rsp.attr_value.len = send_len;
-
-            // Send response to GATT client
-            esp_err_t err = esp_ble_gatts_send_response(gatts_if, param->read.conn_id, param->read.trans_id, ESP_GATT_OK, &rsp);
-            if (err != ESP_OK) {
-                ESP_LOGE(GATTS_TAG, "Failed to send response: %s", esp_err_to_name(err));
-            }
-        }
+        rsp.attr_value.len = 4;
+        rsp.attr_value.value[0] = 0xde;
+        rsp.attr_value.value[1] = 0xed;
+        rsp.attr_value.value[2] = 0xbe;
+        rsp.attr_value.value[3] = 0xef;
+        esp_ble_gatts_send_response(gatts_if, param->read.conn_id, param->read.trans_id,
+                                    ESP_GATT_OK, &rsp);
         break;
     }
     case ESP_GATTS_WRITE_EVT: {
@@ -425,7 +383,7 @@ static void gatts_profile_a_event_handler(esp_gatts_cb_event_t event, esp_gatt_i
             ESP_LOGI(GATTS_TAG, "value len %d, value ", param->write.len);
             ESP_LOG_BUFFER_HEX(GATTS_TAG, param->write.value, param->write.len);
             if (gl_profile_tab[PROFILE_A_APP_ID].descr_handle == param->write.handle && param->write.len == 2){
-                descr_value = param->write.value[1]<<8 | param->write.value[0];
+                uint16_t descr_value = param->write.value[1]<<8 | param->write.value[0];
                 if (descr_value == 0x0001){
                     if (a_property & ESP_GATT_CHAR_PROP_BIT_NOTIFY){
                         ESP_LOGI(GATTS_TAG, "Notification enable");
@@ -470,7 +428,8 @@ static void gatts_profile_a_event_handler(esp_gatts_cb_event_t event, esp_gatt_i
         break;
     case ESP_GATTS_MTU_EVT:
         ESP_LOGI(GATTS_TAG, "MTU exchange, MTU %d", param->mtu.mtu);
-        local_mtu = param->mtu.mtu;
+        negotiated_mtu = param->mtu.mtu - 3; // Subtract 3 bytes for BLE overhead
+        if (negotiated_mtu > 512) negotiated_mtu = 512; // Enforce maximum MTU
         break;
     case ESP_GATTS_UNREG_EVT:
         break;
@@ -549,7 +508,6 @@ static void gatts_profile_a_event_handler(esp_gatts_cb_event_t event, esp_gatt_i
         ESP_LOGI(GATTS_TAG, "Disconnected, remote "ESP_BD_ADDR_STR", reason 0x%02x",
                  ESP_BD_ADDR_HEX(param->disconnect.remote_bda), param->disconnect.reason);
         esp_ble_gap_start_advertising(&adv_params);
-        local_mtu = 23; // Reset MTU for a single connection
         break;
     case ESP_GATTS_CONF_EVT:
         ESP_LOGI(GATTS_TAG, "Confirm receive, status %d, attr_handle %d", param->conf.status, param->conf.handle);
@@ -738,19 +696,74 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
     } while (0);
 }
 
-static void notify_task(void *param) {
-    while (1) {
-        char data_buf[32];
-        int sensor_value = esp_random() % 100;  // 模拟传感器
+// BLE发送任务：定时从ringbuffer读取数据并发送到BLE
+static void ble_tx_task(void *pvParameters)
+{
+    uint8_t *ble_data;
+    size_t data_len;
+    size_t bytes_sent;
+    size_t chunk_size;
+    while(1)
+    {
+        if (uart_ble_ringbuf != NULL)
+        {
+            if (xSemaphoreTake(uart_ble_mutex, portMAX_DELAY) == pdTRUE)
+            {
+                // 读取ringbuffer数据
+                ble_data = (uint8_t *)xRingbufferReceive(uart_ble_ringbuf, &data_len, 0);
+                xSemaphoreGive(uart_ble_mutex);
+                
+                if (ble_data != NULL && data_len > 0)
+                {
+                    bytes_sent = 0;
+                    
+                    ESP_LOGI(GATTS_TAG, "Sending %d bytes to BLE", data_len);
 
-        snprintf(data_buf, sizeof(data_buf), "SENSOR:%d", sensor_value);
+                    // Calculate actual data size per packet (MTU - 3 bytes for overhead)
+                    chunk_size = (negotiated_mtu > 20) ? negotiated_mtu : 20;
+                    
+                    // Send data in chunks
+                    while (bytes_sent < data_len)
+                    {
+                        size_t send_len = (data_len - bytes_sent) > chunk_size ? chunk_size : (data_len - bytes_sent);
+                        
+                        esp_ble_gatts_send_indicate(gl_profile_tab[PROFILE_A_APP_ID].gatts_if,
+                                                  gl_profile_tab[PROFILE_A_APP_ID].conn_id,
+                                                  gl_profile_tab[PROFILE_A_APP_ID].char_handle,
+                                                  send_len, &ble_data[bytes_sent], false);
+                        
+                        bytes_sent += send_len;
+                        vTaskDelay(pdMS_TO_TICKS(20)); // Small delay between packets
+                    }
+                    vRingbufferReturnItem(uart_ble_ringbuf, (void *)ble_data);
+                }
+            }
+        }
+        // 定时检查，每100ms一次
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
 
-        esp_ble_gatts_send_indicate(gl_profile_tab[PROFILE_A_APP_ID].gatts_if, gl_profile_tab[PROFILE_A_APP_ID].conn_id, gl_profile_tab[PROFILE_A_APP_ID].char_handle,
-                                    strlen(data_buf), (uint8_t *)data_buf, false);
-
-        printf("Notify data: %s\n", data_buf);
-
-        vTaskDelay(pdMS_TO_TICKS(2000));
+void ble_write_to_buffer(const char *data, size_t len)
+{
+    if (uart_ble_ringbuf != NULL)
+    {
+        if (xSemaphoreTake(uart_ble_mutex, portMAX_DELAY) == pdTRUE)
+        {
+            // 等待缓冲区有足够空间
+            size_t free_size = xRingbufferGetCurFreeSize(uart_ble_ringbuf);
+            while (free_size < len)
+            {
+                xSemaphoreGive(uart_ble_mutex);
+                vTaskDelay(pdMS_TO_TICKS(10));
+                free_size = xRingbufferGetCurFreeSize(uart_ble_ringbuf);
+                xSemaphoreTake(uart_ble_mutex, portMAX_DELAY);
+            }
+            ESP_LOGI(GATTS_TAG, "Writing %d bytes to BLE ringbuffer", len);
+            // 写入ringbuffer
+            xRingbufferSend(uart_ble_ringbuf, data, len, portMAX_DELAY);
+            xSemaphoreGive(uart_ble_mutex);
+        }
     }
 }
 
@@ -816,13 +829,22 @@ void ble_gatt_init(void)
         ESP_LOGE(GATTS_TAG, "gatts app register error, error code = %x", ret);
         return;
     }
-    esp_err_t local_mtu_ret = esp_ble_gatt_set_local_mtu(500);
+    esp_err_t local_mtu_ret = esp_ble_gatt_set_local_mtu(203);
     if (local_mtu_ret){
         ESP_LOGE(GATTS_TAG, "set local  MTU failed, error code = %x", local_mtu_ret);
     }
 
-    // 创建一个 FreeRTOS 任务做周期性上报
-    xTaskCreate(notify_task, "notify_task", 4096, NULL, 5, NULL);
+    // 初始化ringbuffer和互斥锁
+    uart_ble_ringbuf = xRingbufferCreate(UART_BLE_RINGBUF_SIZE, RINGBUF_TYPE_BYTEBUF);
+    uart_ble_mutex = xSemaphoreCreateMutex();
+    if (uart_ble_ringbuf == NULL || uart_ble_mutex == NULL){
+        ESP_LOGE(GATTS_TAG, "Failed to create ringbuffer or mutex");
+    }
+    else{
+        // 创建串口接收任务和BLE发送任务
+        xTaskCreate(ble_tx_task, "ble_tx_task", 2048, NULL, 5, NULL);
+    }
 
+    
     return;
 }
