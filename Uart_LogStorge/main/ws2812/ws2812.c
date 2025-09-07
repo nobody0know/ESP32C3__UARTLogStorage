@@ -32,6 +32,8 @@ static uint32_t red = 10;
 static uint32_t green = 0;
 static uint32_t blue = 0;
 
+uint16_t frequency = 2000;
+
 typedef struct
 {
     rmt_encoder_t base;
@@ -167,14 +169,7 @@ void ok_led()
     red = 0;
     blue = 0;
     green = 11;
-    
-}
-
-void error_led()
-{
-    red = 0;
-    blue = 11;
-    green = 0;
+    frequency = 2000;
 }
 
 void tfcard_writing()
@@ -182,6 +177,15 @@ void tfcard_writing()
     red = 0;
     blue = 11;
     green = 0;
+    frequency = 2000;
+}
+
+void low_battery()
+{
+    red = 11;
+    blue = 0;
+    green = 0;
+    frequency = 200;
 }
 
 
@@ -225,6 +229,6 @@ void WS2812_Task(void *param)
         ESP_ERROR_CHECK(rmt_transmit(led_chan, led_encoder, led_strip_pixels, sizeof(led_strip_pixels), &tx_config));
         ESP_ERROR_CHECK(rmt_tx_wait_all_done(led_chan, portMAX_DELAY));
         vTaskDelay(pdMS_TO_TICKS(200));
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        vTaskDelay(pdMS_TO_TICKS(frequency));
     }
 }

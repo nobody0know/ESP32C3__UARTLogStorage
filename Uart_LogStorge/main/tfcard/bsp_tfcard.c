@@ -20,6 +20,7 @@
 #include "freertos/semphr.h"
 #include "ws2812/ws2812.h"
 #include "esp_timer.h"
+#include "bsp_tfcard.h"
 
 
 
@@ -48,6 +49,7 @@ void tfcard_task(void *pvParameters);
 
 RingbufHandle_t tfcard_ringbuf = NULL;
 sdmmc_card_t *card;
+uint8_t sdcard_init_state = TF_CARD_STATE_UNINIT;
 
 const char mount_point[] = MOUNT_POINT;
 
@@ -284,12 +286,14 @@ void tfcard_init(void)
         {
             ESP_LOGE(TAG, "Failed to mount filesystem. "
                           "If you want the card to be formatted, set the CONFIG_FORMAT_IF_MOUNT_FAILED menuconfig option.");
+            sdcard_init_state = TF_CARD_STATE_UNMOUNT;
         }
         else
         {
             ESP_LOGE(TAG, "Failed to initialize the card (%s). "
                           "Make sure SD card lines have pull-up resistors in place.",
                      esp_err_to_name(ret));
+            sdcard_init_state = TF_CARD_STATE_UNINIT;
 #ifdef CONFIG_DEBUG_PIN_CONNECTIONS
             check_sd_card_pins(&config, pin_count);
 #endif
@@ -297,6 +301,8 @@ void tfcard_init(void)
         return;
     }
     ESP_LOGI(TAG, "Filesystem mounted");
+
+    sdcard_init_state = TF_CARD_STATE_MOUNT;
 
     ok_led();
 
@@ -311,6 +317,11 @@ void tfcard_deinit(void)
 {
     esp_vfs_fat_sdcard_unmount(MOUNT_POINT, card);
     ESP_LOGI(TAG, "Card unmounted");
+}
+
+uint8_t GetTfCardState(void)
+{
+    return sdcard_init_state;
 }
 
 // TF 卡任务函数
@@ -408,7 +419,7 @@ void tfcard_task(void *pvParameters)
 // 提供一个公共函数用于向环形缓冲区写入数据，增加限流机制
 void tfcard_write_to_buffer(const char *data, size_t len)
 {
-    if (tfcard_ringbuf != NULL)
+    if (tfcard_ringbuf != NULL && GetTfCardState() == TF_CARD_STATE_MOUNT)
     {
         if (xSemaphoreTake(tfcard_ringbuf_mutex, portMAX_DELAY) == pdTRUE)
         { // 获取互斥锁
@@ -426,5 +437,9 @@ void tfcard_write_to_buffer(const char *data, size_t len)
             xRingbufferSend(tfcard_ringbuf, data, len, portMAX_DELAY);
             xSemaphoreGive(tfcard_ringbuf_mutex); // 释放互斥锁
         }
+    }
+    else
+    {
+        ESP_LOGW(TAG, "TF card is not mounted, data will be discarded");
     }
 }

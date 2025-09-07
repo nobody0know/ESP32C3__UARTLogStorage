@@ -37,5 +37,5 @@ esp_err_t rmt_new_led_strip_encoder(const led_strip_encoder_config_t *config, rm
 void ws2812_init(void);
 void ok_led();
 void close_led();
-void error_led();
+void low_battery();
 void tfcard_writing();
