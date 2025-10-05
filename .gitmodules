@@ -1,0 +1,3 @@
+[submodule "Flutter_BleMonitor"]
+	path = Flutter_BleMonitor
+	url = https://github.com/nobody0know/Flutter_BleMonitor.git
